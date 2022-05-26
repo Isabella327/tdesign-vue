@@ -5,7 +5,7 @@ import { AddRectangleIcon, MinusRectangleIcon } from 'tdesign-icons-vue';
 import cloneDeep from 'lodash/cloneDeep';
 import get from 'lodash/get';
 import { CreateElement } from 'vue';
-import TableTreeStore from './tree-store';
+import TableTreeStore, { SwapParams } from './tree-store';
 import {
   TdEnhancedTableProps, PrimaryTableCol, TableRowData, TableRowValue, TableRowState,
 } from '../type';
@@ -27,6 +27,13 @@ export default function useTreeData(props: TdEnhancedTableProps, context: SetupC
     rowKey: props.rowKey || 'id',
     childrenKey: props.tree?.childrenKey || 'children',
   }));
+
+  const checkedColumn = computed(() => columns.value.find((col) => col.colKey === 'row-select'));
+
+  watch(checkedColumn, (column) => {
+    if (!store.value) return;
+    store.value.updateDisabledState(dataSource.value, column, rowDataKeys.value);
+  });
 
   function getFoldIcon(h: CreateElement) {
     const params = { type: 'fold' };
@@ -52,15 +59,15 @@ export default function useTreeData(props: TdEnhancedTableProps, context: SetupC
       if (!data) return [];
       // 如果没有树形解构，则不需要相关逻辑
       if (!props.tree || !Object.keys(props.tree).length) {
-        // @ts-ignore
         dataSource.value = data;
         return;
       }
-      const newVal = cloneDeep(data);
-      // @ts-ignore
-      dataSource.value = newVal;
-      // @ts-ignore
+      let newVal = cloneDeep(data);
       store.value.initialTreeStore(newVal, props.columns, rowDataKeys.value);
+      if (props.tree?.defaultExpandAll) {
+        newVal = store.value.expandAll(newVal, rowDataKeys.value);
+      }
+      dataSource.value = newVal;
     },
     { immediate: true },
   );
@@ -95,23 +102,19 @@ export default function useTreeData(props: TdEnhancedTableProps, context: SetupC
    * 组件实例方法，展开或收起某一行
    * @param p 行数据
    */
-  function toggleExpandData(p: { row: TableRowData; rowIndex: number; trigger?: 'inner' }) {
-    if (!props.tree) {
-      console.error('toggleExpandData can only be used in tree data.');
-      return;
-    }
+  function toggleExpandData(p: { row: TableRowData; rowIndex: number }, trigger?: 'expand-fold-icon') {
     dataSource.value = store.value.toggleExpandData(p, dataSource.value, rowDataKeys.value);
-    if (p.trigger === 'inner') {
-      const rowValue = get(p.row, rowDataKeys.value.rowKey);
-      const params = {
-        row: p.row,
-        rowIndex: p.rowIndex,
-        rowState: store.value?.treeDataMap?.get(rowValue),
-      };
-      props.onTreeExpandChange?.(params);
-      // Vue3 ignore next line
-      context.emit('tree-expand-change', params);
-    }
+    const rowValue = get(p.row, rowDataKeys.value.rowKey);
+    const rowState = store.value?.treeDataMap?.get(rowValue);
+    const params = {
+      row: p.row,
+      rowIndex: p.rowIndex,
+      rowState,
+      trigger,
+    };
+    props.onTreeExpandChange?.(params);
+    // Vue3 ignore next line
+    context.emit('tree-expand-change', params);
   }
 
   function getTreeNodeColumnCol() {
@@ -143,7 +146,7 @@ export default function useTreeData(props: TdEnhancedTableProps, context: SetupC
         return (
           <div class={[tableTreeClasses.col, classes]} style={colStyle}>
             {!!childrenNodes.length && (
-              <span class={tableTreeClasses.icon} onClick={() => toggleExpandData({ ...p, trigger: 'inner' })}>
+              <span class={tableTreeClasses.icon} onClick={() => toggleExpandData(p, 'expand-fold-icon')}>
                 {iconNode}
               </span>
             )}
@@ -191,7 +194,7 @@ export default function useTreeData(props: TdEnhancedTableProps, context: SetupC
    */
   function remove(key: TableRowValue) {
     // 引用传值，可自动更新 dataSource。（dataSource 本是内部变量，可以在任何地方进行任何改变）
-    dataSource.value = store.value.remove(key, dataSource.value, rowDataKeys.value);
+    dataSource.value = [...store.value.remove(key, dataSource.value, rowDataKeys.value)];
   }
 
   /**
@@ -201,26 +204,69 @@ export default function useTreeData(props: TdEnhancedTableProps, context: SetupC
    */
   function appendTo<T>(key: TableRowValue, newData: T) {
     // 引用传值，可自动更新 dataSource。（dataSource 本是内部变量，可以在任何地方进行任何改变）
-    dataSource.value = store.value.appendTo(key, newData, dataSource.value, rowDataKeys.value);
+    dataSource.value = [...store.value.appendTo(key, newData, dataSource.value, rowDataKeys.value)];
   }
 
   /**
-   * 设置展开行层级
+   * 当前节点之后，插入节点
    */
-  // function setExpandedLevel(level: 1 | 2 | 3 | 4 | 5) {
-  //   dataSource.value = store.value.setExpandedLevel(level, dataSource.value, rowDataKeys.value);
-  // }
+  function insertAfter<T>(rowValue: TableRowValue, newData: T) {
+    dataSource.value = [...store.value.insertAfter(rowValue, newData, dataSource.value, rowDataKeys.value)];
+  }
+
+  /**
+   * 当前节点之后，插入节点
+   */
+  function insertBefore<T>(rowValue: TableRowValue, newData: T) {
+    dataSource.value = [...store.value.insertBefore(rowValue, newData, dataSource.value, rowDataKeys.value)];
+  }
+
+  /**
+   * 展开所有节点
+   */
+  function expandAll() {
+    dataSource.value = [...store.value.expandAll(dataSource.value, rowDataKeys.value)];
+  }
+
+  /**
+   * 收起所有节点
+   */
+  function foldAll() {
+    dataSource.value = [...store.value.foldAll(dataSource.value, rowDataKeys.value)];
+  }
+
+  /**
+   * 交换行数据
+   */
+  function swapData(params: SwapParams<TableRowData>) {
+    const r = store.value.swapData(dataSource.value, params, rowDataKeys.value);
+    if (r.result) {
+      dataSource.value = [...r.dataSource];
+    } else {
+      const params = {
+        code: r.code,
+        reason: r.reason,
+      };
+      props.onAbnormalDragSort?.(params);
+      // Vue3 do not need next line
+      context.emit('abnormal-drag-sort', params);
+    }
+  }
 
   return {
     store,
     rowDataKeys,
     dataSource,
+    swapData,
     setData,
     getData,
     remove,
     appendTo,
+    insertAfter,
+    insertBefore,
     formatTreeColumn,
     toggleExpandData,
-    // setExpandedLevel,
+    expandAll,
+    foldAll,
   };
 }
